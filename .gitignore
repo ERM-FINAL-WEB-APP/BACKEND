@@ -1,0 +1,31 @@
+# Dependencies — re-installed via `npm install` on every clone / deploy
+node_modules
+
+# Environment files — contain secrets, NEVER commit
+.env
+.env.local
+.env.production
+.env.development
+.env.*.local
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.swp
+*.swo
+
+# Build artifacts (we don't build, but just in case)
+dist
+build

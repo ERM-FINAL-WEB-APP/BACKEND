@@ -1,0 +1,30 @@
+{
+  "name": "erm-web-backend",
+  "version": "1.0.0",
+  "description": "Tesco ERM Web backend — shares the same MongoDB database as the mobile backend and HRMS. Employees created in HRMS can sign in on the web app with the same credentials.",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js"
+  },
+  "keywords": ["erm", "web", "express", "mongodb", "tesco"],
+  "author": "Tesco Digitals",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@sendgrid/mail": "^8.1.6",
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.7.4",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.6.2",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^8.0.7",
+    "resend": "^6.12.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
