@@ -184,9 +184,20 @@ exports.checkIn = async (req, res) => {
     // Late if check-in is past 10:01 AM local. Anyone clocking in at
     // 10:01 or later is flagged late; the cumulative late count then
     // drives the half-day / full-day LOP rule in the leave policy calc.
+    // CRITICAL: Render runs in UTC. Convert via Intl.DateTimeFormat in
+    // Asia/Kolkata so a 10:01 AM IST check-in is correctly flagged late
+    // regardless of where the host's clock thinks "now" is.
     const now = new Date();
+    const istParts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      hour:   '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const istHour   = parseInt(istParts.find(p => p.type === 'hour')?.value   || '0', 10);
+    const istMinute = parseInt(istParts.find(p => p.type === 'minute')?.value || '0', 10);
     const isLate =
-      now.getHours() > 10 || (now.getHours() === 10 && now.getMinutes() >= 1);
+      istHour > 10 || (istHour === 10 && istMinute >= 1);
     const status = isLate ? 'late' : 'present';
 
     const checkInLat = (typeof lat === 'number' && isFinite(lat)) ? lat : null;

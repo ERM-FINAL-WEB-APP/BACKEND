@@ -174,6 +174,9 @@ exports.login = async (req, res) => {
         { employeeId: emailLower },
         { email: emailRegex },
         { username: emailLower },
+        // Historical emails — so login by an OLD address still works
+        // when HR has edited the user's email in HRMS.
+        { emailHistory: emailLower },
       ],
     });
 
