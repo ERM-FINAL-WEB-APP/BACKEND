@@ -181,8 +181,27 @@ exports.actLeave = async (req, res) => {
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ success: false, message: 'managerStatus must be Approved or Rejected' });
     }
-    doc.managerStatus = status === 'approved' ? 'Approved' : 'Rejected';
+    const me = await User.findById(req.user.id).lean();
+    const myName =
+      (me && (me.name || [me.firstName, me.lastName].filter(Boolean).join(' ').trim())) ||
+      'Manager';
+    doc.managerStatus   = status === 'approved' ? 'Approved' : 'Rejected';
+    doc.managerStatusBy = myName;
+    doc.managerStatusAt = new Date();
     await doc.save();
+
+    // Fire a notification to the employee so they know their manager acted.
+    try {
+      const { notify } = require('../utils/notify');
+      await notify(doc.user, {
+        title: `${doc.requestType === 'permission' ? 'Permission' : 'Leave'} ${doc.managerStatus.toLowerCase()} by your manager`,
+        body:  `Awaiting HR review.`,
+        type:  'leave',
+      });
+    } catch (e) {
+      console.warn('[manager.actLeave] notify failed:', e.message);
+    }
+
     res.json({ success: true, item: doc });
   } catch (err) {
     console.error('[manager.actLeave]', err);
@@ -204,8 +223,26 @@ exports.actAllowance = async (req, res) => {
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ success: false, message: 'managerStatus must be Approved or Rejected' });
     }
-    doc.managerStatus = status === 'approved' ? 'Approved' : 'Rejected';
+    const me2 = await User.findById(req.user.id).lean();
+    const myName2 =
+      (me2 && (me2.name || [me2.firstName, me2.lastName].filter(Boolean).join(' ').trim())) ||
+      'Manager';
+    doc.managerStatus   = status === 'approved' ? 'Approved' : 'Rejected';
+    doc.managerStatusBy = myName2;
+    doc.managerStatusAt = new Date();
     await doc.save();
+
+    try {
+      const { notify } = require('../utils/notify');
+      await notify(doc.user, {
+        title: `Allowance ${doc.managerStatus.toLowerCase()} by your manager`,
+        body:  `Awaiting HR review.`,
+        type:  'allowance',
+      });
+    } catch (e) {
+      console.warn('[manager.actAllowance] notify failed:', e.message);
+    }
+
     res.json({ success: true, item: doc });
   } catch (err) {
     console.error('[manager.actAllowance]', err);
