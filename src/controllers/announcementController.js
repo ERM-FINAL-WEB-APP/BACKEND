@@ -41,7 +41,20 @@ function normalizeAudience(a) {
 exports.list = async (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
-    const items = await Announcement.find({ isActive: true })
+    // Filter rules:
+    //   • All-audience announcements are visible to everyone.
+    //   • Manager-team announcements are visible ONLY to users whose _id
+    //     appears in that announcement's audienceUserIds.
+    //   • Department / team announcements (legacy) fall through as
+    //     visible-to-all for now — that scoping isn't wired yet.
+    const filter = {
+      isActive: true,
+      $or: [
+        { audience: { $ne: 'manager-team' } },                  // legacy + 'all'
+        { audience: 'manager-team', audienceUserIds: req.user.id }, // targeted at me
+      ],
+    };
+    const items = await Announcement.find(filter)
       .sort({ createdAt: -1 })
       .limit(limit);
     res.json(items);

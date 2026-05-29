@@ -20,4 +20,9 @@ router.get('/attendance',           auth, mgr.attendance);
 router.get('/attendance-summary',   auth, mgr.attendanceSummary);
 router.get('/live-locations',       auth, mgr.liveLocations);
 
+// Manager-scoped announcements — posts go ONLY to assigned team.
+router.post  ('/announcements',     auth, mgr.postAnnouncement);
+router.get   ('/announcements',     auth, mgr.myAnnouncements);
+router.delete('/announcements/:id', auth, mgr.deleteAnnouncement);
+
 module.exports = router;

@@ -365,3 +365,117 @@ function pickLabel(value, sidecar) {
   if (sidecar && typeof sidecar === 'string' && !isHex(sidecar)) return sidecar;
   return '';
 }
+
+
+/* ─── Manager announcements ────────────────────────────────────────── */
+
+const Announcement = require('../models/Announcement');
+
+/**
+ * POST /api/manager/announcements
+ * Body: { title, body, category? }
+ *
+ * Posts an announcement that ONLY the manager's direct team will see.
+ * The audience is snapshotted at post-time — re-assignments after the
+ * fact don't change who sees this specific announcement.
+ */
+exports.postAnnouncement = async (req, res) => {
+  try {
+    const { manager, team } = await resolveTeamIds(req);
+    if (!manager) return res.status(401).json({ success: false, message: 'Manager not found.' });
+    if (team.length === 0) {
+      return res.status(403).json({
+        success: false,
+        message: 'You don\'t have any subordinates. Only managers can post team announcements.',
+      });
+    }
+    const title = String(req.body?.title || '').trim();
+    const body  = String(req.body?.body  || '').trim();
+    if (!title || !body) {
+      return res.status(400).json({ success: false, message: 'Title and body are required.' });
+    }
+    const category = ['holiday','policy','event','general'].includes(req.body?.category)
+      ? req.body.category
+      : 'general';
+
+    const postedByName =
+      manager.name ||
+      [manager.firstName, manager.lastName].filter(Boolean).join(' ').trim() ||
+      'Manager';
+
+    const doc = await Announcement.create({
+      title,
+      body,
+      category,
+      audience:        'manager-team',
+      postedBy:        postedByName,
+      postedByUser:    manager._id,
+      audienceUserIds: team.map((u) => u._id),
+      isActive:        true,
+    });
+
+    // Fire a notification to each team member so the bell badge ticks.
+    try {
+      const { notify } = require('../utils/notify');
+      await Promise.all(team.map((u) =>
+        notify(u._id, {
+          title: `New announcement from ${postedByName}`,
+          body:  title,
+          type:  'announcement',
+        })
+      ));
+    } catch (e) {
+      console.warn('[manager.postAnnouncement] notify failed:', e.message);
+    }
+
+    res.status(201).json({ success: true, announcement: doc, teamSize: team.length });
+  } catch (err) {
+    console.error('[manager.postAnnouncement]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * GET /api/manager/announcements
+ * Announcements this manager has posted to their team. Useful for the
+ * manager to review / audit what they've sent.
+ */
+exports.myAnnouncements = async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.json({ success: true, items: [] });
+    const items = await Announcement.find({
+      postedByUser: me._id,
+      audience:     'manager-team',
+      isActive:     true,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, items });
+  } catch (err) {
+    console.error('[manager.myAnnouncements]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * DELETE /api/manager/announcements/:id
+ * Soft-delete one of the manager's own team announcements.
+ */
+exports.deleteAnnouncement = async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(401).json({ success: false, message: 'Unauthorised.' });
+    const doc = await Announcement.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Not found.' });
+    if (String(doc.postedByUser) !== String(me._id)) {
+      return res.status(403).json({ success: false, message: 'You can only delete your own announcements.' });
+    }
+    doc.isActive = false;
+    await doc.save();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[manager.deleteAnnouncement]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
