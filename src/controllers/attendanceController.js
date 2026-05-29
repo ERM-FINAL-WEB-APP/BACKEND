@@ -810,6 +810,29 @@ exports.adminListAll = async (req, res) => {
       .sort({ date: -1, checkIn: 1 })
       .limit(limit)
       .lean();
+
+    // Re-derive late from checkIn time (IST). Mirrors the mobile backend
+    // fix — rows saved before the timezone fix landed will still show as
+    // 'present' otherwise, even though the check-in was after 10:01 AM.
+    const istHm = (d) => {
+      try {
+        const parts = new Intl.DateTimeFormat('en-GB', {
+          timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+        }).formatToParts(new Date(d));
+        return {
+          h: parseInt(parts.find(p => p.type === 'hour')?.value   || '0', 10),
+          m: parseInt(parts.find(p => p.type === 'minute')?.value || '0', 10),
+        };
+      } catch { return { h: 0, m: 0 }; }
+    };
+    for (const a of items) {
+      if (!a.checkIn) continue;
+      const s = String(a.status || '').toLowerCase();
+      if (s !== 'present' && s !== 'late') continue;
+      const { h, m } = istHm(a.checkIn);
+      const isLate = h > 10 || (h === 10 && m >= 1);
+      a.status = isLate ? 'late' : 'present';
+    }
     res.json({ count: items.length, items });
   } catch (err) {
     console.error('attendance.adminListAll error:', err);
