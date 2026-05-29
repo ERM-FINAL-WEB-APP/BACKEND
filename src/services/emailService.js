@@ -83,13 +83,10 @@ async function sendViaResend(toEmail, subject, html, text) {
     html,
     text,
   };
-  if (LOGO_BASE64) {
-    payload.attachments = [{
-      filename:   'logo.png',
-      content:    LOGO_BASE64,
-      content_id: LOGO_CID,
-    }];
-  }
+  // Logo attachment intentionally removed — HR asked for a plain text
+  // email without the inline image file. The HTML template still reads
+  // cleanly without the logo block.
+
 
   const res = await fetch('https://api.resend.com/emails', {
     method:  'POST',
@@ -127,16 +124,8 @@ async function sendViaSendGrid(toEmail, subject, html, text) {
     ],
   };
 
-  // Inline logo (CID) — the HTML references <img src="cid:logo.png">.
-  if (LOGO_BASE64) {
-    payload.attachments = [{
-      content:     LOGO_BASE64,
-      filename:    'logo.png',
-      type:        'image/png',
-      disposition: 'inline',
-      content_id:  LOGO_CID,
-    }];
-  }
+  // Logo attachment intentionally removed — see the Resend branch above.
+
 
   // Use global fetch (Node 18+) — no extra dependency needed.
   const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
@@ -166,15 +155,12 @@ async function sendViaSendGrid(toEmail, subject, html, text) {
 
 // ─── HTML template ───────────────────────────────────────────────────────────
 function buildHtml(otp, fromName) {
-  const logoSrc = LOGO_BASE64 ? `cid:${LOGO_CID}` : '';
-  const logoImg = logoSrc
-    ? `<img src="${logoSrc}" alt="${fromName}" width="180" style="display:block; max-width:180px; height:auto; margin:0 auto;" />`
-    : '';
-
+  // No logo / no <img> — HR asked for the OTP email to be plain text
+  // with no attached image file. The wordmark header below substitutes.
   return `
   <div style="font-family: Arial, Helvetica, sans-serif; max-width:520px; margin:0 auto; padding:32px 24px; background:#f6f9f5; border-radius:12px;">
     <div style="text-align:center; padding-bottom:18px;">
-      ${logoImg}
+      <div style="font-size:22px; font-weight:800; letter-spacing:1.5px; color:#1F6A1E;">${fromName}</div>
     </div>
 
     <div style="background:#ffffff; border-radius:10px; padding:28px 24px; box-shadow:0 4px 12px rgba(0,0,0,0.04);">

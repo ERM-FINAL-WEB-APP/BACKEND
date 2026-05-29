@@ -168,17 +168,88 @@ exports.login = async (req, res) => {
     // doesn't match in queries. So we look up by physical fields:
     // employeeId (HRMS canonical), email (case-insensitive), and username
     // (HRMS sets this when admin creates).
-    const user = await User.findOne({
+    // ─── Primary exact lookup ────────────────────────────────────────
+    // employeeId / email / username / emailHistory — these are the four
+    // fields HRMS could possibly have written this account under.
+    let user = await User.findOne({
       $or: [
         { employeeId: raw },
         { employeeId: emailLower },
         { email: emailRegex },
         { username: emailLower },
-        // Historical emails — so login by an OLD address still works
-        // when HR has edited the user's email in HRMS.
         { emailHistory: emailLower },
       ],
     });
+    let lookupStrategy = 'exact';
+
+    // ─── Fallback A: local-part match ─────────────────────────────────
+    // The exact email doesn't match (likely because HR edited the email
+    // in HRMS but the write silently failed BEFORE the emailHistory
+    // safety net shipped). Try matching the local part (before @) against
+    // email and username.  ONLY accept if exactly one user matches —
+    // otherwise we'd risk logging into the wrong account.
+    if (!user && emailLower.includes('@')) {
+      const localPart = emailLower.split('@')[0];
+      if (localPart && localPart.length >= 4) {
+        const localRe = new RegExp(`^${escapeRe(localPart)}(@|$)`, 'i');
+        const candidates = await User.find({
+          $or: [
+            { email:    localRe },
+            { username: new RegExp(`^${escapeRe(localPart)}$`, 'i') },
+          ],
+        }).limit(3);
+        if (candidates.length === 1) {
+          user = candidates[0];
+          lookupStrategy = 'local-part';
+        } else if (candidates.length > 1) {
+          console.warn('[login] local-part "' + localPart + '" matched ' +
+            candidates.length + ' users — refusing to guess.');
+        }
+      }
+    }
+
+    // ─── Fallback B: substring on email/username/emailHistory ─────────
+    // Same idea but a looser substring match. Only used when fallback A
+    // didn't hit. Still requires exactly one candidate so we never log
+    // the wrong user in.
+    if (!user && emailLower.length >= 5) {
+      const local = emailLower.includes('@') ? emailLower.split('@')[0] : emailLower;
+      // Try progressively shorter needles: full local, first dot/dash/
+      // underscore segment (so "monica.tescodigitals" also tries "monica").
+      // Each query still requires EXACTLY one matching user.
+      const needles = [];
+      if (local.length >= 4) needles.push(local);
+      const firstSeg = local.split(/[._-]/)[0];
+      if (firstSeg && firstSeg.length >= 4 && !needles.includes(firstSeg)) {
+        needles.push(firstSeg);
+      }
+      for (const needle of needles) {
+        const containsRe = new RegExp(escapeRe(needle), 'i');
+        const exactRe    = new RegExp('^' + escapeRe(needle) + '$', 'i');
+        const candidates = await User.find({
+          $or: [
+            { email:        containsRe },
+            { username:     containsRe },
+            { emailHistory: containsRe },
+            // First-name exact / full-name contains. Catches the
+            // case where HR set the email to one address but the user
+            // is typing a different one — we'll match them by name.
+            { firstName:    exactRe },
+            { name:         containsRe },
+          ],
+        }).limit(3);
+        if (candidates.length === 1) {
+          user = candidates[0];
+          lookupStrategy = 'substring(' + needle + ')';
+          console.log('[login] substring match (needle "' + needle + '"): ' +
+            '_id=' + user._id + ' email="' + (user.email || '') + '"');
+          break;
+        } else if (candidates.length > 1) {
+          console.warn('[login] substring "' + needle + '" matched ' +
+            candidates.length + ' users — moving to next needle.');
+        }
+      }
+    }
 
     if (!user) {
       console.log('\n[login] ❌ NO USER FOUND');
@@ -222,7 +293,7 @@ exports.login = async (req, res) => {
     }
 
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    console.log(`[login] ✓ ${user.userId} logged in`);
+    console.log(`[login] ✓ ${user.userId} logged in (via ${lookupStrategy})`);
     res.json({
       token,
       user: { name: user.name, userId: user.userId, email: user.email, role: user.role },
