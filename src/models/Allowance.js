@@ -47,6 +47,16 @@ const allowanceSchema = new mongoose.Schema(
       enum: ['pending', 'approved', 'rejected'],
       default: 'pending',
     },
+    // HR review breakdown — the employee requests `amount`, but HR may
+    // approve only part of it after verifying the actual distance.
+    //   approvedAmount  → the ₹ that will be reimbursed
+    //   rejectedAmount  → amount − approvedAmount  (what HR struck off)
+    //   amountComment   → free-text note ("approved at 60% of claim because
+    //                      GPS shows shorter distance" etc.). Surfaced to
+    //                      the employee in the in-app notification.
+    approvedAmount: { type: Number, default: 0 },
+    rejectedAmount: { type: Number, default: 0 },
+    amountComment:  { type: String, default: '' },
     hrComment: { type: String, default: '' },
     reviewedBy: { type: String, default: '' },
     reviewedAt: { type: Date },

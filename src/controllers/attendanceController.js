@@ -270,7 +270,40 @@ exports.checkOut = async (req, res) => {
     record.checkOut = now;
     record.workedHours =
       Math.round(((record.checkOut - record.checkIn) / 3600000) * 100) / 100;
-    if (record.workedHours < 4) record.status = 'halfday';
+
+    // ─── Early-checkout policy ────────────────────────────────────────
+    // Standard workday is ~8 hrs. If the employee leaves with less than
+    // ~6.5 hrs on the clock, treat it as a partial day:
+    //   • If they filed a Permission for today → status stays whatever
+    //     the day was (present/late); LOP rule counts each permission
+    //     against the 2-per-month policy. Permission already documents
+    //     why they left early.
+    //   • If they did NOT file a Permission → mark the row as 'halfday'.
+    //     The LOP rule treats every halfday over the 2-per-month quota
+    //     as 0.5 LOP, so habitual early-leavers still hit the policy.
+    const SHORT_DAY_HOURS = 6.5;
+    if (record.workedHours < SHORT_DAY_HOURS) {
+      let hadPermission = false;
+      try {
+        const perm = await Leave.findOne({
+          user: req.user.id,
+          requestType: 'permission',
+          date,
+          status: { $in: ['approved', 'pending'] },
+        }).lean();
+        hadPermission = !!perm;
+      } catch { /* if the lookup fails, fall through and assume no permission */ }
+
+      if (!hadPermission) {
+        // No permission on file → half-day LOP fodder. The LOP calc on
+        // the read path (HRMS Reports + Productivity card) folds this
+        // into 1/2 LOP via the excessPerms branch.
+        record.status = 'halfday';
+      }
+      // If hadPermission, leave the status untouched — the day is
+      // accounted for via the permission row.
+    }
+
 
     const checkOutLat = (typeof lat === 'number' && isFinite(lat)) ? lat : null;
     const checkOutLng = (typeof lng === 'number' && isFinite(lng)) ? lng : null;
