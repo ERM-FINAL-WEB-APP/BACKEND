@@ -270,12 +270,29 @@ exports.actAllowance = async (req, res) => {
 
     try {
       const { notify } = require('../utils/notify');
-      const breakdown = (status === 'approved' && rejectedAmount > 0)
-        ? ` Approved \u20b9${approvedAmount.toLocaleString('en-IN')} \u00b7 Rejected \u20b9${rejectedAmount.toLocaleString('en-IN')}.`
-        : '';
+      // Compose a rich notification body the employee can see at a glance.
+      // Includes: claim ₹, approved ₹, rejected ₹ (when partial), and the
+      // manager's reason comment when supplied — that way the employee
+      // knows exactly what was approved and why anything was rejected.
+      const claimedAmt = Number(doc.amount) || 0;
+      const approvedRs = Math.max(0, Number(approvedAmount) || 0);
+      const rejectedRs = Math.max(0, Number(rejectedAmount) || 0);
+      const fmt = (n) => '\u20b9' + Number(n).toLocaleString('en-IN');
+      let bodyLine;
+      if (status === 'approved' && rejectedRs > 0) {
+        bodyLine = `Approved ${fmt(approvedRs)} of your ${fmt(claimedAmt)} claim ` +
+                   `(${fmt(rejectedRs)} not approved). Awaiting HR review.`;
+      } else if (status === 'approved') {
+        bodyLine = `Approved ${fmt(approvedRs)} for your claim. Awaiting HR review.`;
+      } else {
+        bodyLine = `Your ${fmt(claimedAmt)} claim was rejected by your manager.`;
+      }
+      // Append the manager's comment as the "reason" line when present.
+      const reason = String(req.body.amountComment || '').trim();
+      if (reason) bodyLine += ` Reason: ${reason}`;
       await notify(doc.user, {
         title: `Allowance ${doc.managerStatus.toLowerCase()} by your manager`,
-        body:  `Awaiting HR review.` + breakdown,
+        body:  bodyLine,
         type:  'allowance',
       });
     } catch (e) {
