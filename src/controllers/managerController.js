@@ -209,7 +209,16 @@ exports.actLeave = async (req, res) => {
   }
 };
 
-/** PATCH /api/manager/allowances/:id   { managerStatus } */
+/**
+ * PATCH /api/manager/allowances/:id
+ * Body: { managerStatus: 'Approved'|'Rejected',
+ *         approvedAmount?, rejectedAmount?, amountComment? }
+ *
+ * Manager can now split a claim into an approved portion + rejected
+ * portion (same shape HR uses on HRMS). The breakdown is stored on the
+ * Allowance doc so HR sees it on the HRMS Allowance page and the
+ * employee sees it on the ERM apps.
+ */
 exports.actAllowance = async (req, res) => {
   try {
     const { team } = await resolveTeamIds(req);
@@ -223,6 +232,28 @@ exports.actAllowance = async (req, res) => {
     if (!['approved', 'rejected'].includes(status)) {
       return res.status(400).json({ success: false, message: 'managerStatus must be Approved or Rejected' });
     }
+
+    // Validate amounts when supplied. Approved cannot exceed the claim;
+    // rejected fills the gap. Missing amounts default to a full approve
+    // (= entire claim) or full reject (rejectedAmount = entire claim).
+    const claimed = Number(doc.amount) || 0;
+    let approvedAmount = req.body.approvedAmount;
+    let rejectedAmount = req.body.rejectedAmount;
+    if (approvedAmount !== undefined) approvedAmount = Number(approvedAmount);
+    if (rejectedAmount !== undefined) rejectedAmount = Number(rejectedAmount);
+    if (status === 'approved') {
+      // If amounts weren't sent, treat it as a full approve.
+      if (!isFinite(approvedAmount)) approvedAmount = claimed;
+      if (approvedAmount < 0 || approvedAmount > claimed) {
+        return res.status(400).json({ success: false, message: `approvedAmount must be between 0 and ${claimed}` });
+      }
+      rejectedAmount = Math.max(0, claimed - approvedAmount);
+    } else {
+      // Full reject — everything goes to rejected.
+      approvedAmount = 0;
+      rejectedAmount = claimed;
+    }
+
     const me2 = await User.findById(req.user.id).lean();
     const myName2 =
       (me2 && (me2.name || [me2.firstName, me2.lastName].filter(Boolean).join(' ').trim())) ||
@@ -230,13 +261,21 @@ exports.actAllowance = async (req, res) => {
     doc.managerStatus   = status === 'approved' ? 'Approved' : 'Rejected';
     doc.managerStatusBy = myName2;
     doc.managerStatusAt = new Date();
+    doc.approvedAmount  = approvedAmount;
+    doc.rejectedAmount  = rejectedAmount;
+    if (typeof req.body.amountComment === 'string') {
+      doc.amountComment = req.body.amountComment;
+    }
     await doc.save();
 
     try {
       const { notify } = require('../utils/notify');
+      const breakdown = (status === 'approved' && rejectedAmount > 0)
+        ? ` Approved \u20b9${approvedAmount.toLocaleString('en-IN')} \u00b7 Rejected \u20b9${rejectedAmount.toLocaleString('en-IN')}.`
+        : '';
       await notify(doc.user, {
         title: `Allowance ${doc.managerStatus.toLowerCase()} by your manager`,
-        body:  `Awaiting HR review.`,
+        body:  `Awaiting HR review.` + breakdown,
         type:  'allowance',
       });
     } catch (e) {
