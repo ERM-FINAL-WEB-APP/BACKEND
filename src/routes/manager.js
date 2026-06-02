@@ -19,6 +19,10 @@ router.patch('/allowances/:id',     auth, mgr.actAllowance);
 router.get('/attendance',           auth, mgr.attendance);
 router.get('/attendance-summary',   auth, mgr.attendanceSummary);
 router.get('/live-locations',       auth, mgr.liveLocations);
+// Attendance regularisation queue — subordinates' filed requests
+// surface here for the manager to approve or reject.
+router.get  ('/attendance-requests',     auth, mgr.attendanceRequests);
+router.patch('/attendance-requests/:id', auth, mgr.actAttendanceRequest);
 
 // Manager-scoped announcements — posts go ONLY to assigned team.
 router.post  ('/announcements',     auth, mgr.postAnnouncement);

@@ -246,6 +246,44 @@ exports.actLeave = async (req, res) => {
       console.warn('[manager.actLeave] notify failed:', e.message);
     }
 
+    // ── Dual-write to the mobile backend ──────────────────────────────
+    // Earlier deployments split ERM Web Backend + ERM Mobile Backend
+    // onto different MongoDB databases, and the rejection notif never
+    // reached the employee because the Notification doc landed in the
+    // wrong DB. We now ALSO forward the decision to the mobile backend
+    // (which writes to its own canonical Notification collection AND
+    // updates the same Leave doc by ObjectId). Safe to call even when
+    // both backends share a DB — the second write is idempotent (same
+    // ObjectId, same status). Gated by MOBILE_API_URL + MOBILE_ADMIN_SECRET
+    // env vars so local dev doesn't need a second service running.
+    try {
+      const MOBILE_API   = (process.env.MOBILE_API_URL   || '').trim().replace(/\/+$/, '');
+      const ADMIN_SECRET = (process.env.MOBILE_ADMIN_SECRET || '').trim();
+      if (MOBILE_API && ADMIN_SECRET) {
+        const payload = {
+          status:       doc.status,           // 'rejected' on rejection, unchanged on approve
+          managerStatus: status,               // 'approved' | 'rejected'
+          reviewedBy:    `Manager (${myName})`,
+          hrComment:     doc.hrComment || '',
+        };
+        const url = `${MOBILE_API}/api/leave/admin/${encodeURIComponent(doc._id)}`;
+        const r = await fetch(url, {
+          method:  'PATCH',
+          headers: { 'Content-Type': 'application/json', 'x-admin-secret': ADMIN_SECRET },
+          body:    JSON.stringify(payload),
+        });
+        if (!r.ok) {
+          console.warn('[manager.actLeave] mobile dual-write HTTP', r.status);
+        } else {
+          console.log('[manager.actLeave] ✓ mobile dual-write OK');
+        }
+      } else {
+        console.log('[manager.actLeave] MOBILE_API_URL / MOBILE_ADMIN_SECRET not set; skipping mobile dual-write');
+      }
+    } catch (e) {
+      console.warn('[manager.actLeave] mobile dual-write failed:', e.message);
+    }
+
     res.json({ success: true, item: doc });
   } catch (err) {
     console.error('[manager.actLeave]', err);
@@ -613,6 +651,82 @@ exports.deleteAnnouncement = async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('[manager.deleteAnnouncement]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+
+/**
+ * GET /api/manager/attendance-requests?status=pending|approved|rejected
+ * Lists every regularisation request filed by the manager's team. The
+ * mobile backend owns the `attendancerequests` collection; ERM Web
+ * reads the same MongoDB so we just project + scope to the team here.
+ */
+exports.attendanceRequests = async (req, res) => {
+  try {
+    const AttendanceRequest = require('../models/AttendanceRequest');
+    const { team } = await resolveTeamIds(req);
+    const teamIds  = team.map((u) => u._id);
+    const filter = { user: { $in: teamIds } };
+    const status = String(req.query.status || '').toLowerCase();
+    if (['pending', 'approved', 'rejected', 'expired'].includes(status)) {
+      filter.status = status;
+    }
+    const items = await AttendanceRequest.find(filter)
+      .populate('user', 'firstName lastName name employeeId email designation department')
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, items });
+  } catch (err) {
+    console.error('[manager.attendanceRequests]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+/**
+ * PATCH /api/manager/attendance-requests/:id  { status, hrComment? }
+ * Manager approves or rejects a subordinate's attendance request.
+ * Same status field + notification flow as HR's admin path.
+ */
+exports.actAttendanceRequest = async (req, res) => {
+  try {
+    const AttendanceRequest = require('../models/AttendanceRequest');
+    const { team } = await resolveTeamIds(req);
+    const ids = new Set(team.map((u) => String(u._id)));
+    const doc = await AttendanceRequest.findById(req.params.id);
+    if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
+    if (!ids.has(String(doc.user))) {
+      return res.status(403).json({ success: false, message: 'Request does not belong to your team.' });
+    }
+    const status = String(req.body.status || '').trim().toLowerCase();
+    if (!['approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'status must be approved or rejected' });
+    }
+    const me = await User.findById(req.user.id).lean();
+    const myName =
+      (me && (me.name || [me.firstName, me.lastName].filter(Boolean).join(' ').trim())) ||
+      'Manager';
+    doc.status     = status;
+    doc.reviewedAt = new Date();
+    doc.reviewedBy = `Manager (${myName})`;
+    if (typeof req.body.hrComment === 'string') doc.hrComment = req.body.hrComment;
+    await doc.save();
+    try {
+      const { notify } = require('../utils/notify');
+      const userIdForNotif = doc.user?._id || doc.user;
+      await notify(userIdForNotif, {
+        title: `Attendance request ${status} by your manager`,
+        body:  `Your regularisation for ${doc.date} was ${status} by ${myName}` +
+               (doc.hrComment ? `. Note: "${doc.hrComment}"` : '.'),
+        type:  'attendance',
+        link:  '/(tabs)/attendance',
+      });
+    } catch (e) {
+      console.warn('[manager.actAttendanceRequest] notify failed:', e.message);
+    }
+    res.json({ success: true, item: doc });
+  } catch (err) {
+    console.error('[manager.actAttendanceRequest]', err);
     res.status(500).json({ success: false, message: err.message });
   }
 };
