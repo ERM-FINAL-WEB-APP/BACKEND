@@ -222,14 +222,25 @@ exports.actLeave = async (req, res) => {
       const body  = isApproved
         ? `Your ${kind.toLowerCase()} request for ${when} is approved. Awaiting HR review.`
         : `Your ${kind.toLowerCase()} request for ${when} was rejected by ${myName}.`;
-      const out = await notify(doc.user, {
+      // Coerce doc.user to ObjectId-safe form. If `doc.user` was
+      // populated upstream, .  / ObjectId-style strings need to be
+      // unwrapped before notify() so the Notification.create call
+      // doesn't trip mongoose's cast check (we observed a silent
+      // failure when notify received a populated user object on
+      // rejection, which is the only branch where status flips
+      // managerStatus AND status simultaneously).
+      const userIdForNotif = doc.user?._id || doc.user;
+      console.log(`[manager.actLeave] firing notify status=${status} user=${userIdForNotif}`);
+      const out = await notify(userIdForNotif, {
         title,
         body,
         type: 'leave',
         link: '/(tabs)/leave',
       });
       if (!out) {
-        console.warn('[manager.actLeave] notify returned null for user', String(doc.user));
+        console.warn('[manager.actLeave] notify returned null for user', String(userIdForNotif));
+      } else {
+        console.log(`[manager.actLeave] ✓ notif saved id=${out._id} for user=${userIdForNotif}`);
       }
     } catch (e) {
       console.warn('[manager.actLeave] notify failed:', e.message);
