@@ -188,16 +188,49 @@ exports.actLeave = async (req, res) => {
     doc.managerStatus   = status === 'approved' ? 'Approved' : 'Rejected';
     doc.managerStatusBy = myName;
     doc.managerStatusAt = new Date();
+    // When the manager REJECTS, mark the request as final on the HR
+    // side too — HR doesn't need to review a request the manager has
+    // already declined, and leaving status='pending' caused the ERM
+    // apps to render a stale "Pending" badge forever (the employee
+    // never saw a visible change). Setting status='rejected' here
+    // also feeds the leave-history list, which already styles
+    // rejected rows in red.
+    if (status === 'rejected') {
+      doc.status     = 'rejected';
+      doc.reviewedAt = new Date();
+      doc.reviewedBy = doc.reviewedBy || `Manager (${myName})`;
+      doc.hrComment  = doc.hrComment  || `Manager rejection (${myName}).`;
+    }
     await doc.save();
 
-    // Fire a notification to the employee so they know their manager acted.
+    // Fire a notification to the employee for BOTH approval and
+    // rejection. The previous body read "Awaiting HR review." in
+    // both branches, which gave the employee no signal that a
+    // rejection had happened — they couldn't tell the two emails
+    // apart at a glance. Now the title + body explicitly call out
+    // approve vs reject.
     try {
       const { notify } = require('../utils/notify');
-      await notify(doc.user, {
-        title: `${doc.requestType === 'permission' ? 'Permission' : 'Leave'} ${doc.managerStatus.toLowerCase()} by your manager`,
-        body:  `Awaiting HR review.`,
-        type:  'leave',
+      const kind = doc.requestType === 'permission' ? 'Permission' : 'Leave';
+      const when = kind === 'Permission'
+        ? `${doc.date}${doc.startTime && doc.endTime ? ` (${doc.startTime} - ${doc.endTime})` : ''}`
+        : `${doc.startDate}${doc.endDate && doc.endDate !== doc.startDate ? ` - ${doc.endDate}` : ''}`;
+      const isApproved = doc.managerStatus === 'Approved';
+      const title = isApproved
+        ? `${kind} approved by your manager`
+        : `${kind} rejected by your manager`;
+      const body  = isApproved
+        ? `Your ${kind.toLowerCase()} request for ${when} is approved. Awaiting HR review.`
+        : `Your ${kind.toLowerCase()} request for ${when} was rejected by ${myName}.`;
+      const out = await notify(doc.user, {
+        title,
+        body,
+        type: 'leave',
+        link: '/(tabs)/leave',
       });
+      if (!out) {
+        console.warn('[manager.actLeave] notify returned null for user', String(doc.user));
+      }
     } catch (e) {
       console.warn('[manager.actLeave] notify failed:', e.message);
     }
