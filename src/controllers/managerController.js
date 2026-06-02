@@ -706,18 +706,44 @@ exports.actAttendanceRequest = async (req, res) => {
     const myName =
       (me && (me.name || [me.firstName, me.lastName].filter(Boolean).join(' ').trim())) ||
       'Manager';
-    doc.status     = status;
-    doc.reviewedAt = new Date();
-    doc.reviewedBy = `Manager (${myName})`;
-    if (typeof req.body.hrComment === 'string') doc.hrComment = req.body.hrComment;
+
+    // Updated Jun 2026 — manager writes to managerStatus first, then
+    // chooses whether the request moves on to HR:
+    //   * Manager Approved -> managerStatus = 'Approved', status stays
+    //     'pending' so HR sees it in HRMS Attendance Requests and makes
+    //     the final call. HR's status column is empty until they act.
+    //   * Manager Rejected -> managerStatus = 'Rejected', status moves
+    //     to 'rejected' immediately so the request is closed. HR doesn't
+    //     need to act (the rejection IS the final decision).
+    doc.managerStatus   = status === 'approved' ? 'Approved' : 'Rejected';
+    doc.managerStatusBy = myName;
+    doc.managerStatusAt = new Date();
+    if (typeof req.body.managerComment === 'string' && req.body.managerComment) {
+      doc.managerComment = req.body.managerComment;
+    } else if (typeof req.body.hrComment === 'string' && req.body.hrComment) {
+      // Backwards-compat: the older modal sent the comment under
+      // hrComment. Treat it as the manager note here.
+      doc.managerComment = req.body.hrComment;
+    }
+    if (status === 'rejected') {
+      doc.status     = 'rejected';
+      doc.reviewedBy = `Manager (${myName})`;
+      doc.reviewedAt = new Date();
+    } else {
+      doc.status = 'pending';
+    }
     await doc.save();
+
     try {
       const { notify } = require('../utils/notify');
       const userIdForNotif = doc.user?._id || doc.user;
+      const noteSuffix = doc.managerComment ? ` Note: \"${doc.managerComment}\"` : '';
+      const bodyLine = status === 'approved'
+        ? `Your regularisation for ${doc.date} was approved by ${myName}. Awaiting HR review.${noteSuffix}`
+        : `Your regularisation for ${doc.date} was rejected by ${myName}.${noteSuffix}`;
       await notify(userIdForNotif, {
         title: `Attendance request ${status} by your manager`,
-        body:  `Your regularisation for ${doc.date} was ${status} by ${myName}` +
-               (doc.hrComment ? `. Note: "${doc.hrComment}"` : '.'),
+        body:  bodyLine,
         type:  'attendance',
         link:  '/(tabs)/attendance',
       });

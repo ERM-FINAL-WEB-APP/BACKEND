@@ -27,8 +27,17 @@ const attendanceRequestSchema = new mongoose.Schema(
       enum: ['pending', 'approved', 'rejected', 'expired'],
       default: 'pending',
     },
+    // Manager-tier decision (Jun 2026). Mirror of the mobile backend's
+    // schema — both processes share the same Mongo collection, so this
+    // model has to know about every field too or strict mode would
+    // strip it on save.
+    managerStatus:    { type: String, enum: ['', 'Approved', 'Rejected'], default: '' },
+    managerStatusBy:  { type: String, default: '' },
+    managerStatusAt:  { type: Date,   default: null },
+    managerComment:   { type: String, default: '' },
     reviewedBy: { type: String, default: '' },
     reviewedAt: { type: Date },
+    hrComment:  { type: String, default: '' },
   },
   { timestamps: true }
 );
