@@ -572,6 +572,77 @@ exports.liveLocations = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/manager/me
+ *
+ * Single source of truth for "am I a manager?". Returns isManager: true
+ * if ANY of the following holds:
+ *   1. The logged-in user's role field is 'manager' (set when HR flipped
+ *      Convert-to-Manager in HRMS Employee List).
+ *   2. The logged-in user's email matches an active row in the shared
+ *      Manager directory (HRMS Manager page or auto-upserted by the
+ *      Convert toggle).
+ *   3. The logged-in user has at least one subordinate (someone whose
+ *      assignedTo matches their name).
+ *
+ * Used by the ERM Web Sidebar to decide whether to show the
+ * "Manager Access" link. Centralising this here means we don't have to
+ * keep three frontend checks in sync.
+ */
+exports.me = async (req, res) => {
+  try {
+    const me = await User.findById(req.user.id).lean();
+    if (!me) return res.status(404).json({ success: false, message: 'User not found' });
+
+    const signals = { byRole: false, byDirectory: false, byTeam: false };
+    let directoryName = '';
+
+    // Signal 1 — explicit role on the user row
+    signals.byRole = String(me.role || '').toLowerCase() === 'manager';
+
+    // Signal 2 — email present in the active managers directory
+    try {
+      const mongoose = require('mongoose');
+      const mgrCol = mongoose.connection.db.collection('managers');
+      if (me.email) {
+        const hit = await mgrCol.findOne({ email: String(me.email).toLowerCase(), isActive: true });
+        if (hit) { signals.byDirectory = true; directoryName = hit.name || ''; }
+      }
+      if (!signals.byDirectory) {
+        // Also try by name (full or partial — same logic as resolveTeamIds).
+        const fullName = [me.firstName || '', me.lastName || ''].filter(Boolean).join(' ').trim();
+        if (fullName) {
+          const hit = await mgrCol.findOne({
+            name: new RegExp(`^\\s*${fullName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i'),
+            isActive: true,
+          });
+          if (hit) { signals.byDirectory = true; directoryName = hit.name || ''; }
+        }
+      }
+    } catch (e) {
+      console.warn('[manager.me] directory check failed:', e.message);
+    }
+
+    // Signal 3 — has subordinates
+    let teamSize = 0;
+    try {
+      const { team } = await resolveTeamIds(req);
+      teamSize = team.length;
+      signals.byTeam = teamSize > 0;
+    } catch (e) {
+      console.warn('[manager.me] team resolution failed:', e.message);
+    }
+
+    const isManager = signals.byRole || signals.byDirectory || signals.byTeam;
+    const tag = me.email || me.employeeId || String(me._id);
+    console.log(`[manager.me] ${tag} isManager=${isManager} byRole=${signals.byRole} byDirectory=${signals.byDirectory} byTeam=${signals.byTeam} teamSize=${teamSize}`);
+    res.json({ success: true, isManager, signals, teamSize, directoryName });
+  } catch (err) {
+    console.error('[manager.me]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 // ─── helpers ────────────────────────────────────────────────────────
 function pickLabel(value, sidecar) {
   const isHex = (s) => typeof s === 'string' && /^[a-f0-9]{24}$/i.test(s);

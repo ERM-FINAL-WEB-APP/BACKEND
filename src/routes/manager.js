@@ -11,6 +11,7 @@ const router  = express.Router();
 const auth    = require('../middleware/authMiddleware');
 const mgr     = require('../controllers/managerController');
 
+router.get('/me',                   auth, mgr.me);
 router.get('/team',                 auth, mgr.team);
 router.get('/leaves',               auth, mgr.leaves);
 router.patch('/leaves/:id',         auth, mgr.actLeave);
