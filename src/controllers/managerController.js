@@ -62,7 +62,7 @@ function assignedToFilter(names) {
     const safe = escape(n.trim());
     return [
       { assignedTo: new RegExp(`^\\s*${safe}\\s*$`, 'i') },
-      { assignedTo: new RegExp(`^\\s*${safe}\\s*[-\\u2013\\u2014]`, 'i') },
+      { assignedTo: new RegExp(`^\\s*${safe}\\s*[-–—]`, 'i') },
     ];
   });
   return { $or: orClauses };
