@@ -117,6 +117,13 @@ async function resolveTeamIds(req) {
 exports.team = async (req, res) => {
   try {
     const { manager, team, names } = await resolveTeamIds(req);
+    const tag = manager
+      ? (manager.email || manager.employeeId || String(manager._id))
+      : 'unknown';
+    console.log(
+      `[manager.team] ${tag} role=${manager?.role || 'n/a'} ` +
+      `names=[${names.join(' | ')}] team=${team.length}`
+    );
     res.json({
       success: true,
       manager: manager ? {
