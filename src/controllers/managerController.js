@@ -51,12 +51,18 @@ function managerDisplayNames(user) {
 function assignedToFilter(names) {
   if (!names || names.length === 0) return { _id: null };  // matches nothing
   const escape = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Match the manager's name as:
+  //   • exact (whitespace-tolerant)
+  //   • name followed by " - title"
+  //   • name followed by " \u2014 title" (em dash — what the dropdown
+  //     displays). Legacy rows from before the value-only fix may have
+  //     the rendered text stored.
+  //   • name followed by " \u2013 title" (en dash, defensive)
   const orClauses = names.flatMap((n) => {
     const safe = escape(n.trim());
-    // Match either an exact name OR a name followed by " - <title>" suffix.
     return [
       { assignedTo: new RegExp(`^\\s*${safe}\\s*$`, 'i') },
-      { assignedTo: new RegExp(`^\\s*${safe}\\s*-`, 'i') },
+      { assignedTo: new RegExp(`^\\s*${safe}\\s*[-\\u2013\\u2014]`, 'i') },
     ];
   });
   return { $or: orClauses };
@@ -67,11 +73,41 @@ async function resolveTeamIds(req) {
   const me = await User.findById(req.user.id).lean();
   if (!me) return { manager: null, team: [], names: [] };
   const names = managerDisplayNames(me);
+
+  // ADDITIONAL: pull this user's canonical name from the shared
+  // `managers` directory. HR adds entries there using whatever name
+  // they want shown in the Assigned-To dropdown — that's the value
+  // that ends up in employees' assignedTo field. If it diverges from
+  // the User row's firstName + lastName concat (different spacing,
+  // initials, etc.) the team query would miss every subordinate.
+  // We match the directory entry by EITHER email OR existing names
+  // so we catch both Convert-to-Manager and Add-Manager flows.
+  try {
+    const mgrCol = require('mongoose').connection.db.collection('managers');
+    const orClauses = [];
+    if (me.email) orClauses.push({ email: String(me.email).toLowerCase() });
+    for (const n of names) {
+      orClauses.push({ name: new RegExp(`^\\s*${String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') });
+    }
+    if (orClauses.length > 0) {
+      const hits = await mgrCol.find({ isActive: true, $or: orClauses }).toArray();
+      for (const h of hits) {
+        if (h && h.name) names.push(String(h.name).trim());
+      }
+    }
+  } catch (e) {
+    // Non-fatal — fall back to User-row names. We still log so ops
+    // can see if the lookup is silently failing in prod.
+    console.warn('[manager.resolveTeamIds] directory lookup failed:', e.message);
+  }
+
+  // De-dupe & drop empties.
+  const uniqNames = [...new Set(names.filter((s) => s && String(s).trim()))];
   const team = await User
-    .find(assignedToFilter(names))
+    .find(assignedToFilter(uniqNames))
     .select('_id firstName lastName name email employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt')
     .lean();
-  return { manager: me, team, names };
+  return { manager: me, team, names: uniqNames };
 }
 
 /**
