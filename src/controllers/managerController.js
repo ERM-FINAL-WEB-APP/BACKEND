@@ -787,7 +787,7 @@ exports.attendanceRequests = async (req, res) => {
       filter.status = status;
     }
     const items = await AttendanceRequest.find(filter)
-      .populate('user', 'firstName lastName name employeeId email designation department')
+      .populate('user', 'firstName lastName name employeeId email designation designationTitle department departmentName')
       .sort({ createdAt: -1 })
       .lean();
     res.json({ success: true, items });
