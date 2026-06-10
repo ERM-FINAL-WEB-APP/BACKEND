@@ -292,7 +292,11 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: 'Invalid credentials — password does not match. Try resetting via Forgot Password, or have HR re-set the password from the HRMS edit form.' });
     }
 
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    // 10-day session: token expires 10 days after issue. Once expired
+    // the protect middleware will throw TokenExpiredError, the client's
+    // 401 handler clears local auth state, and the user is bounced to
+    // the login screen.
+    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '10d' });
     console.log(`[login] ✓ ${user.userId} logged in (via ${lookupStrategy})`);
     res.json({
       token,
