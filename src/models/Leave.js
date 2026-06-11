@@ -26,9 +26,18 @@ const leaveSchema = new mongoose.Schema(
     daysCount: { type: Number, default: 0 },
 
     // ----- Permission fields -----
+    // Accept BOTH the short forms ('Medical', 'Personal') and the long
+    // forms ('Medical Permission', 'Personal Permission') the ERM Web
+    // frontend dropdown produces. Without 'Medical Permission' in the
+    // enum the create() throws a ValidatorError and the controller
+    // returns a generic "Server error" — exactly the bug HR hit on
+    // 11-Jun-26.
     permissionType: {
       type: String,
-      enum: ['Personal', 'Medical', 'Official', 'Other', 'Casual Leave'],
+      enum: [
+        'Personal', 'Medical', 'Official', 'Other', 'Casual Leave',
+        'Personal Permission', 'Medical Permission', 'Official Permission', 'Other Permission',
+      ],
     },
     date: { type: String },
     startTime: { type: String },
