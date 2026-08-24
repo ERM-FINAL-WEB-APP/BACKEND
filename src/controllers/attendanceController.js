@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 const Attendance = require('../models/Attendance');
 const Leave = require('../models/Leave');
+// #425 — Overlay helper ported from mobile backend so getSummary can
+// apply the identical "fully-approved permission wins over halfday/late"
+// rule the calendar already uses. Without this the ERM Web summary
+// diverges from the ERM Mobile summary for the same user + month.
+const { applyLeavePermissionOverlay } = require('../utils/leaveOverlay');
 const AttendanceRequest = require('../models/AttendanceRequest');
 const LocationPing = require('../models/LocationPing');
 const User = require('../models/User');
@@ -285,11 +290,17 @@ exports.checkOut = async (req, res) => {
     if (record.workedHours < SHORT_DAY_HOURS) {
       let hadPermission = false;
       try {
+        // #425 — Tightened predicate. Require BOTH manager and HR
+        // approval before the day is treated as covered by a
+        // Permission; pending / manager-only / HR-only / rejected
+        // requests all fall through to halfday-LOP, matching the
+        // strict "Manager AND HR" rule the summary card enforces.
         const perm = await Leave.findOne({
           user: req.user.id,
           requestType: 'permission',
           date,
-          status: { $in: ['approved', 'pending'] },
+          managerStatus: 'Approved',
+          status: 'approved',
         }).lean();
         hadPermission = !!perm;
       } catch { /* if the lookup fails, fall through and assume no permission */ }
@@ -524,6 +535,27 @@ exports.getSummary = async (req, res) => {
       date: { $gte: start, $lte: end },
     }).lean();
 
+    // #425 — Apply the fully-approved leave/permission overlay before
+    // counting. Mirrors the mobile backend's getSummary so Late +
+    // Permission counts are identical on both platforms.
+    //   • Days marked 'late' at check-in but covered by an approved
+    //     permission become 'permission' (removed from Late).
+    //   • Only permissions where BOTH manager AND HR approved count
+    //     (see Leave.find predicate below — matches leaveOverlay.js).
+    const leaves = await Leave.find({
+      user: req.user.id,
+      status: 'approved',              // HR final approval
+      managerStatus: 'Approved',       // Manager approval
+      $or: [
+        { requestType: 'leave',      startDate: { $lte: end }, endDate: { $gte: start } },
+        { requestType: 'permission', date: { $gte: start, $lte: end } },
+      ],
+    }).lean();
+    const uidStr = String(req.user.id);
+    records.forEach(r => { if (!r.user) r.user = uidStr; });
+    const shimmedLeaves = leaves.map(l => ({ ...l, user: uidStr }));
+    applyLeavePermissionOverlay(records, shimmedLeaves, { rangeStart: start, rangeEnd: end });
+
     const summary = {
       present: 0,
       absent: 0,
@@ -535,7 +567,11 @@ exports.getSummary = async (req, res) => {
       totalDays: records.length,
     };
     records.forEach((r) => {
-      if (summary[r.status] !== undefined) summary[r.status] += 1;
+      // #417 — HR override wins over derived status.
+      const effective = (r.hrOverride === true && r.hrOverrideStatus)
+        ? r.hrOverrideStatus
+        : r.status;
+      if (summary[effective] !== undefined) summary[effective] += 1;
     });
 
     // Walk the month: classify each day as workday / weekly-off / holiday.
@@ -570,6 +606,41 @@ exports.getSummary = async (req, res) => {
         summary.late + summary.halfday + summary.permission + summary.leave
       )
     );
+
+    // #451 — PERMISSIONS COUNT FIX (mirrors the ERM Mobile backend fix).
+    //
+    // BUG: an employee could apply for a permission, see it as "Approved" in
+    // Permission History, and still see PERMISSIONS = 00 on the summary card.
+    // Two compounding causes:
+    //   1. The count was derived from ATTENDANCE rows whose status ended up
+    //      as 'permission'. But applyLeavePermissionOverlay deliberately
+    //      rewrites a PAST permission day to 'present' whenever the employee
+    //      has a check-in ("the permission excused the lateness"). So a normal
+    //      partial-day permission (e.g. 01:00-02:00 PM on a day the employee
+    //      attended) could NEVER be counted — the row was always 'present'.
+    //   2. The overlay only considers requests approved by BOTH tiers
+    //      (managerStatus 'Approved' AND status 'approved'), while the UI
+    //      shows the "Approved" badge on HR approval alone. So an HR-approved
+    //      permission displayed as Approved but was invisible to the counter.
+    //
+    // FIX: count the PERMISSION REQUESTS themselves for the month, using the
+    // SAME condition the UI uses to render the "Approved" badge, so the card
+    // always agrees with what the employee sees in Permission History.
+    //
+    // Runs AFTER summary.absent so the absent math still uses the
+    // attendance-derived value and permission days (which are also counted as
+    // present) are not double-subtracted.
+    try {
+      summary.permission = await Leave.countDocuments({
+        user: req.user.id,
+        requestType: 'permission',
+        status: 'approved',            // HR approval — matches the UI badge
+        date: { $gte: start, $lte: end },
+      });
+    } catch (e) {
+      // Leave the attendance-derived value as a fallback rather than failing
+      // the whole summary response.
+    }
 
     res.json(summary);
   } catch (err) {
