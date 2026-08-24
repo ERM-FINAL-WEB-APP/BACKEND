@@ -105,7 +105,7 @@ async function resolveTeamIds(req) {
   const uniqNames = [...new Set(names.filter((s) => s && String(s).trim()))];
   const team = await User
     .find(assignedToFilter(uniqNames))
-    .select('_id firstName lastName name email employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt')
+    .select('_id firstName lastName name email phone employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt')
     .lean();
   return { manager: me, team, names: uniqNames };
 }
@@ -139,6 +139,7 @@ exports.team = async (req, res) => {
         employeeId: u.employeeId,
         name:       u.name || [u.firstName, u.lastName].filter(Boolean).join(' ').trim(),
         email:      u.email,
+        phone:      u.phone || '',
         photoUrl:   u.photoUrl || '',
         designation: pickLabel(u.designation, u.designationTitle),
         department:  pickLabel(u.department,  u.departmentName),
@@ -470,38 +471,41 @@ exports.attendanceSummary = async (req, res) => {
     const lastDay = new Date(year, month, 0).getDate();
     const end   = `${year}-${monthStr}-${String(lastDay).padStart(2, '0')}`;
 
-    const rows = await Attendance.find({
+    // #470 — Use the canonical monthly summary (same counts HR + the
+    // employee card + HRMS show). The old raw-status aggregation diverged
+    // on permission days, HR-overridden days, Sundays, and future months.
+    const { computeMonthlySummary } = require('./attendanceController');
+
+    const hourRows = await Attendance.find({
       user: { $in: team.map((u) => u._id) },
       date: { $gte: start, $lte: end },
-    }).lean();
+    }).select('user workedHours').lean();
+    const hoursByUser = new Map();
+    for (const r of hourRows) {
+      const k = String(r.user);
+      hoursByUser.set(k, (hoursByUser.get(k) || 0) + Number(r.workedHours || 0));
+    }
 
-    const summaryByUser = new Map();
-    for (const u of team) {
-      summaryByUser.set(String(u._id), {
-        userId:     String(u._id),
-        employeeId: u.employeeId,
-        name:       u.name || [u.firstName, u.lastName].filter(Boolean).join(' ').trim(),
+    const items = await Promise.all(team.map(async (u) => {
+      let s = { present: 0, late: 0, absent: 0, permission: 0, halfday: 0, leave: 0 };
+      try { s = await computeMonthlySummary(u._id, month, year); }
+      catch (e) { console.warn('[manager.attendanceSummary] failed for', String(u._id), e.message); }
+      return {
+        userId:      String(u._id),
+        employeeId:  u.employeeId,
+        name:        u.name || [u.firstName, u.lastName].filter(Boolean).join(' ').trim(),
         designation: pickLabel(u.designation, u.designationTitle),
-        present: 0, late: 0, absent: 0, permission: 0, halfday: 0,
-        totalWorkedHours: 0,
-      });
-    }
-    for (const r of rows) {
-      const s = summaryByUser.get(String(r.user));
-      if (!s) continue;
-      const st = String(r.status || '').toLowerCase();
-      if      (st === 'present')      s.present    += 1;
-      else if (st === 'late')         s.late       += 1;
-      else if (st === 'absent')       s.absent     += 1;
-      else if (st === 'permission')   s.permission += 1;
-      else if (st === 'halfday' || st === 'half-day') s.halfday += 1;
-      s.totalWorkedHours += Number(r.workedHours || 0);
-    }
-    res.json({
-      success: true,
-      month, year,
-      items: [...summaryByUser.values()],
-    });
+        present:     s.present    || 0,
+        late:        s.late       || 0,
+        absent:      s.absent     || 0,
+        permission:  s.permission || 0,
+        halfday:     s.halfday    || 0,
+        leave:       s.leave      || 0,
+        totalWorkedHours: hoursByUser.get(String(u._id)) || 0,
+      };
+    }));
+
+    res.json({ success: true, month, year, items });
   } catch (err) {
     console.error('[manager.attendanceSummary]', err);
     res.status(500).json({ success: false, message: err.message });

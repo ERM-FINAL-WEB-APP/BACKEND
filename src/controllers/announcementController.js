@@ -49,10 +49,11 @@ exports.list = async (req, res) => {
     //     visible-to-all for now — that scoping isn't wired yet.
     const filter = {
       isActive: true,
-      $or: [
-        { audience: { $ne: 'manager-team' } },                  // legacy + 'all'
-        { audience: 'manager-team', audienceUserIds: req.user.id }, // targeted at me
-      ],
+      // Exclude BOTH team-scoped audiences from the general employee feed:
+      // 'manager-team' (posted from ERM web) and 'team' (posted from ERM
+      // mobile). Manager announcements belong only in the Manager
+      // Announcements section; team members are told via the bell/push.
+      audience: { $nin: ['team', 'manager-team'] },
     };
     const items = await Announcement.find(filter)
       .sort({ createdAt: -1 })

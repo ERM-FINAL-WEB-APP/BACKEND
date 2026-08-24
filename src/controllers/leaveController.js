@@ -71,6 +71,13 @@ exports.applyLeave = async (req, res) => {
       daysCount: daysBetween(startDate, endDate, !!isHalfDay),
       reason,
     });
+    try {
+      const { notifyManagerOfRequest } = require('../utils/notifyManager');
+      notifyManagerOfRequest(req.user.id, {
+        type: 'leave',
+        summary: `${leaveType} ${startDate}${endDate && endDate !== startDate ? ` -> ${endDate}` : ''}`,
+      }).catch(() => {});
+    } catch (_) {}
     res.status(201).json({ message: 'Leave applied successfully', leave });
   } catch (err) {
     console.error(err);
@@ -107,6 +114,13 @@ exports.applyPermission = async (req, res) => {
       durationHours: hours,
       reason,
     });
+    try {
+      const { notifyManagerOfRequest } = require('../utils/notifyManager');
+      notifyManagerOfRequest(req.user.id, {
+        type: 'leave',
+        summary: `Permission ${date} (${startTime}-${endTime})`,
+      }).catch(() => {});
+    } catch (_) {}
     res.status(201).json({ message: 'Permission applied successfully', permission });
   } catch (err) {
     console.error(err);

@@ -147,6 +147,14 @@ exports.submitAllowance = async (req, res) => {
       receiptUrl: receiptUrl || '',
     });
 
+    try {
+      const { notifyManagerOfRequest } = require('../utils/notifyManager');
+      const rupee = (n) => 'Rs.' + Number(n || 0).toLocaleString('en-IN');
+      notifyManagerOfRequest(req.user.id, {
+        type: 'allowance',
+        summary: `${type === 'petrol' ? 'Petrol' : 'Travel'} claim ${rupee(amount)} (${date})`,
+      }).catch(() => {});
+    } catch (_) {}
     res.status(201).json({ message: 'Allowance submitted', allowance });
   } catch (err) {
     console.error('submitAllowance error:', err);
