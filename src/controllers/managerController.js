@@ -739,7 +739,10 @@ exports.myAnnouncements = async (req, res) => {
     if (!me) return res.json({ success: true, items: [] });
     const items = await Announcement.find({
       postedByUser: me._id,
-      audience:     'manager-team',
+      // Match BOTH team-scoped audience values: 'manager-team' (posted from
+      // ERM web) and 'team' (posted from ERM mobile) — so a manager sees
+      // their own team announcements regardless of which app posted them.
+      audience:     { $in: ['team', 'manager-team'] },
       isActive:     true,
     })
       .sort({ createdAt: -1 })
