@@ -526,7 +526,23 @@ const isHolidayISO = (iso) => HOLIDAYS.has(iso);
 // EXACT same counts HR + the employee see. Applies the fully-approved
 // leave/permission overlay, HR-override precedence, holiday-as-present rule,
 // and the approved-permission count fix (#451). Parameterised by userId.
+// #474 — ERM went live on this date. No attendance/report may count any month
+// before it. Single source of truth — change here to shift the start date.
+const ERM_START_YEAR = 2026;
+const ERM_START_MONTH = 7; // July → ERM_START_DATE = 2026-07-01
+function isBeforeErmStart(month, year) {
+  return (year < ERM_START_YEAR) || (year === ERM_START_YEAR && month < ERM_START_MONTH);
+}
+exports.isBeforeErmStart = isBeforeErmStart;
+exports.ERM_START = { year: ERM_START_YEAR, month: ERM_START_MONTH, date: '2026-07-01' };
+
 async function computeMonthlySummary(userId, month, year) {
+  // Months before the ERM start have no valid data — return zeros WITHOUT
+  // querying, so pre-July-2026 records can never surface in any report.
+  if (isBeforeErmStart(month, year)) {
+    return { present: 0, absent: 0, late: 0, permission: 0, halfday: 0, leave: 0,
+             holiday: 0, totalDays: 0, workdaysElapsed: 0 };
+  }
   const { start, end } = monthBounds(month, year);
 
   const records = await Attendance.find({
