@@ -186,12 +186,14 @@ exports.checkIn = async (req, res) => {
       return res.status(400).json({ message: 'Already checked in today' });
     }
 
-    // Late if check-in is past 10:01 AM local. Anyone clocking in at
-    // 10:01 or later is flagged late; the cumulative late count then
-    // drives the half-day / full-day LOP rule in the leave policy calc.
+    // Three-tier check-in classification per HR policy (matches ERM Mobile):
+    //   ≤ 10:00              → present  (on-time)
+    //   10:01 AM – 10:30 AM  → late     (still present, HR sees Late flag)
+    //   > 10:30 AM           → absent   (marked absent even though they DID
+    //                                    check in; the employee can file an
+    //                                    Attendance Regularisation request).
     // CRITICAL: Render runs in UTC. Convert via Intl.DateTimeFormat in
-    // Asia/Kolkata so a 10:01 AM IST check-in is correctly flagged late
-    // regardless of where the host's clock thinks "now" is.
+    // Asia/Kolkata so the cutoffs apply in IST regardless of host timezone.
     const now = new Date();
     const istParts = new Intl.DateTimeFormat('en-GB', {
       timeZone: 'Asia/Kolkata',
@@ -201,9 +203,14 @@ exports.checkIn = async (req, res) => {
     }).formatToParts(now);
     const istHour   = parseInt(istParts.find(p => p.type === 'hour')?.value   || '0', 10);
     const istMinute = parseInt(istParts.find(p => p.type === 'minute')?.value || '0', 10);
-    const isLate =
-      istHour > 10 || (istHour === 10 && istMinute >= 1);
-    const status = isLate ? 'late' : 'present';
+    const minutesSinceMidnight = istHour * 60 + istMinute;
+    const LATE_START = 10 * 60 + 1;    // 10:01
+    const LATE_END   = 10 * 60 + 30;   // 10:30
+    let status;
+    if (minutesSinceMidnight < LATE_START)      status = 'present';
+    else if (minutesSinceMidnight <= LATE_END)  status = 'late';
+    else                                        status = 'absent';
+    const isLate = status === 'late';
 
     const checkInLat = (typeof lat === 'number' && isFinite(lat)) ? lat : null;
     const checkInLng = (typeof lng === 'number' && isFinite(lng)) ? lng : null;
@@ -942,10 +949,13 @@ exports.adminListAll = async (req, res) => {
     for (const a of items) {
       if (!a.checkIn) continue;
       const s = String(a.status || '').toLowerCase();
+      // Only re-tier auto-classified check-ins. Leave HR-manual statuses
+      // (absent/permission/halfday/leave) untouched.
       if (s !== 'present' && s !== 'late') continue;
       const { h, m } = istHm(a.checkIn);
-      const isLate = h > 10 || (h === 10 && m >= 1);
-      a.status = isLate ? 'late' : 'present';
+      const mins = h * 60 + m;
+      // 3-tier: ≤10:00 present · 10:01–10:30 late · >10:30 absent.
+      a.status = mins < 601 ? 'present' : (mins <= 630 ? 'late' : 'absent');
     }
     res.json({ count: items.length, items });
   } catch (err) {
