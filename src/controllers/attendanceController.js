@@ -543,6 +543,22 @@ function isBeforeErmStart(month, year) {
 exports.isBeforeErmStart = isBeforeErmStart;
 exports.ERM_START = { year: ERM_START_YEAR, month: ERM_START_MONTH, date: '2026-07-01' };
 
+// #540 — Was this check-in late? On-time cutoff is 10:00 IST; 10:01+ is late.
+// Used so HR marking a late day "Present" keeps it in the Late bucket (the
+// report shows Present = present + late, so it appears in both). Render runs
+// in UTC — read the wall-clock in Asia/Kolkata via Intl.
+function isLateCheckIn(checkIn) {
+  if (!checkIn) return false;
+  const d = new Date(checkIn);
+  if (isNaN(d.getTime())) return false;
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(d);
+  const h = parseInt(parts.find((p) => p.type === 'hour')?.value   || '0', 10);
+  const m = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
+  return (h * 60 + m) >= (10 * 60 + 1); // >= 10:01
+}
+
 async function computeMonthlySummary(userId, month, year) {
   // Months before the ERM start have no valid data — return zeros WITHOUT
   // querying, so pre-July-2026 records can never surface in any report.
@@ -576,9 +592,16 @@ async function computeMonthlySummary(userId, month, year) {
     holiday: 0, totalDays: records.length,
   };
   records.forEach((r) => {
-    const effective = (r.hrOverride === true && r.hrOverrideStatus)
-      ? r.hrOverrideStatus
-      : r.status;
+    const usedOverride = (r.hrOverride === true && r.hrOverrideStatus);
+    let effective = usedOverride ? r.hrOverrideStatus : r.status;
+    // #540 — When HR marks a LATE check-in as Present (e.g. a 10:13 check-in
+    // that was Absent, then HR overrides to Present), keep the day in the LATE
+    // bucket. The report shows Present = present + late, so it appears in BOTH
+    // Present and Late — HR's "mark present" no longer erases the lateness.
+    // Only for a real HR override, not permission-excused days (hrOverride=false).
+    if (String(effective).toLowerCase() === 'present' && usedOverride && isLateCheckIn(r.checkIn)) {
+      effective = 'late';
+    }
     if (summary[effective] !== undefined) summary[effective] += 1;
   });
 
