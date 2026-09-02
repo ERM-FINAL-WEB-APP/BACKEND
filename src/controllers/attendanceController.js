@@ -186,10 +186,10 @@ exports.checkIn = async (req, res) => {
       return res.status(400).json({ message: 'Already checked in today' });
     }
 
-    // Three-tier check-in classification per HR policy (matches ERM Mobile):
+    // #520 — Three-tier check-in classification per HR policy (matches ERM Mobile):
     //   ≤ 10:00              → present  (on-time)
-    //   10:01 AM – 10:30 AM  → late     (still present, HR sees Late flag)
-    //   > 10:30 AM           → absent   (marked absent even though they DID
+    //   10:01 AM – 10:10 AM  → late     (still present, HR sees Late flag)
+    //   ≥ 10:11 AM           → absent   (marked absent even though they DID
     //                                    check in; the employee can file an
     //                                    Attendance Regularisation request).
     // CRITICAL: Render runs in UTC. Convert via Intl.DateTimeFormat in
@@ -205,7 +205,7 @@ exports.checkIn = async (req, res) => {
     const istMinute = parseInt(istParts.find(p => p.type === 'minute')?.value || '0', 10);
     const minutesSinceMidnight = istHour * 60 + istMinute;
     const LATE_START = 10 * 60 + 1;    // 10:01
-    const LATE_END   = 10 * 60 + 30;   // 10:30
+    const LATE_END   = 10 * 60 + 10;   // 10:10
     let status;
     if (minutesSinceMidnight < LATE_START)      status = 'present';
     else if (minutesSinceMidnight <= LATE_END)  status = 'late';
@@ -954,8 +954,8 @@ exports.adminListAll = async (req, res) => {
       if (s !== 'present' && s !== 'late') continue;
       const { h, m } = istHm(a.checkIn);
       const mins = h * 60 + m;
-      // 3-tier: ≤10:00 present · 10:01–10:30 late · >10:30 absent.
-      a.status = mins < 601 ? 'present' : (mins <= 630 ? 'late' : 'absent');
+      // #520 — 3-tier: ≤10:00 present · 10:01–10:10 late · ≥10:11 absent.
+      a.status = mins < 601 ? 'present' : (mins <= 610 ? 'late' : 'absent');
     }
     res.json({ count: items.length, items });
   } catch (err) {

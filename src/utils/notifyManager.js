@@ -66,10 +66,13 @@ async function notifyManagerOfRequest(employeeUserId, opts = {}) {
     const empName =
       emp.name || [emp.firstName, emp.lastName].filter(Boolean).join(' ').trim() || 'An employee';
     const empTag = emp.employeeId ? ` (${emp.employeeId})` : '';
+    // Distinguish a Permission from a Leave (both stored as type:'leave').
+    // Callers pass an explicit `kindLabel` to override the type default.
     const kindLabel =
-      opts.type === 'allowance' ? 'allowance claim'
-        : opts.type === 'attendance' ? 'attendance request'
-          : 'leave request';
+      opts.kindLabel ? opts.kindLabel
+        : opts.type === 'allowance' ? 'allowance claim'
+          : opts.type === 'attendance' ? 'attendance request'
+            : 'leave request';
 
     return await notify(managerId, {
       title: `New ${kindLabel} from ${empName}`,

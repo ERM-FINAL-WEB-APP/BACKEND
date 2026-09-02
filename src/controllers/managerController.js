@@ -37,8 +37,9 @@ function managerDisplayNames(user) {
   if (full)            names.add(full);
   if (first)           names.add(first);
   if (user.name)       names.add(String(user.name).trim());
-  if (user.employeeId) names.add(String(user.employeeId).trim());
-  if (user.userId)     names.add(String(user.userId).trim());
+  // #490 — DO NOT match assignedTo against the manager's employeeId / userId.
+  // assignedTo holds a manager NAME (the HRMS dropdown value), never an id, so
+  // id-matching only risks wrong/stale team membership after a reassignment.
   return [...names].filter(Boolean);
 }
 
@@ -68,55 +69,227 @@ function assignedToFilter(names) {
   return { $or: orClauses };
 }
 
-/** Resolve the list of subordinate ObjectIds for the logged-in manager. */
-async function resolveTeamIds(req) {
-  const me = await User.findById(req.user.id).lean();
-  if (!me) return { manager: null, team: [], names: [] };
-  const names = managerDisplayNames(me);
+// Fields every subordinate row needs across the manager endpoints.
+const TEAM_SELECT = '_id firstName lastName name email phone employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt status isActive';
 
-  // ADDITIONAL: pull this user's canonical name from the shared
-  // `managers` directory. HR adds entries there using whatever name
-  // they want shown in the Assigned-To dropdown — that's the value
-  // that ends up in employees' assignedTo field. If it diverges from
-  // the User row's firstName + lastName concat (different spacing,
-  // initials, etc.) the team query would miss every subordinate.
-  // We match the directory entry by EITHER email OR existing names
-  // so we catch both Convert-to-Manager and Add-Manager flows.
+/**
+ * Resolve the FULL downline for the logged-in manager — #510 senior-manager
+ * hierarchy. We walk the reporting tree DOWNWARD (Senior Manager → Manager →
+ * Employees), not just direct reports. `assignedTo` holds each employee's
+ * DIRECT manager NAME, so the tree is implicit; we BFS it — match the manager's
+ * names → direct reports; for each report who is themselves a manager, queue
+ * their name → next level; repeat. So a Senior Manager sees the Manager AND the
+ * Manager's team automatically, no manual add.
+ *
+ * Guards: visited-name + visited-id sets break any accidental reporting cycle
+ * and prevent duplicates / self-inclusion; a depth cap is a final safety net.
+ * Derived live from `assignedTo`, so HRMS reassignments update visibility
+ * everywhere immediately.
+ */
+// Seed match-names for a person: own display names + `managers` directory
+// aliases (by email/name). The directory name is what HR stores in reports'
+// assignedTo and can differ from the User-row name.
+async function seedNamesFor(person) {
+  const seedNames = managerDisplayNames(person);
   try {
     const mgrCol = require('mongoose').connection.db.collection('managers');
     const orClauses = [];
-    if (me.email) orClauses.push({ email: String(me.email).toLowerCase() });
-    for (const n of names) {
+    if (person.email) orClauses.push({ email: String(person.email).toLowerCase() });
+    for (const n of seedNames) {
       orClauses.push({ name: new RegExp(`^\\s*${String(n).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') });
     }
     if (orClauses.length > 0) {
       const hits = await mgrCol.find({ isActive: true, $or: orClauses }).toArray();
-      for (const h of hits) {
-        if (h && h.name) names.push(String(h.name).trim());
-      }
+      for (const h of hits) if (h && h.name) seedNames.push(String(h.name).trim());
     }
   } catch (e) {
-    // Non-fatal — fall back to User-row names. We still log so ops
-    // can see if the lookup is silently failing in prod.
-    console.warn('[manager.resolveTeamIds] directory lookup failed:', e.message);
+    console.warn('[manager.seedNamesFor] directory lookup failed:', e.message);
+  }
+  return [...new Set(seedNames.filter((s) => s && String(s).trim()))];
+}
+
+// DIRECT reports of a person (level 1 only) — everyone whose assignedTo names them.
+async function directReportsOf(person) {
+  if (!person) return [];
+  const meIdStr = String(person._id);
+  const seedNames = await seedNamesFor(person);
+  const found = await User.find(assignedToFilter(seedNames)).select(TEAM_SELECT).lean();
+  return found.filter((u) => String(u._id) !== meIdStr);
+}
+
+// FULL downline for ANY person by BFS-ing the assignedTo tree DOWNWARD.
+async function resolveDownline(me) {
+  if (!me) return { team: [], names: [] };
+  const seedNames = await seedNamesFor(me);
+  const teamById  = new Map();
+  const seenNames = new Set();
+  const meIdStr   = String(me._id);
+  const namesAll  = [...seedNames];
+  let   frontier  = [...seedNames];
+  let   depth     = 0;
+
+  while (frontier.length && depth < 12) {
+    depth++;
+    const toQuery = frontier.filter((n) => {
+      const k = String(n).toLowerCase();
+      if (seenNames.has(k)) return false;
+      seenNames.add(k);
+      return true;
+    });
+    if (!toQuery.length) break;
+
+    const level = await User.find(assignedToFilter(toQuery)).select(TEAM_SELECT).lean();
+    const newMembers = [];
+    for (const u of level) {
+      const idStr = String(u._id);
+      if (idStr === meIdStr) continue;
+      if (teamById.has(idStr)) continue;
+      teamById.set(idStr, u);
+      newMembers.push(u);
+    }
+
+    const next = [];
+    const pushName = (nm) => {
+      if (nm && !seenNames.has(String(nm).toLowerCase())) { next.push(nm); namesAll.push(nm); }
+    };
+    for (const u of newMembers) managerDisplayNames(u).forEach(pushName);
+    try {
+      const mgrCol = require('mongoose').connection.db.collection('managers');
+      const or = [];
+      for (const u of newMembers) {
+        if (u.email) or.push({ email: String(u.email).toLowerCase() });
+        for (const nm of managerDisplayNames(u)) {
+          or.push({ name: new RegExp(`^\\s*${String(nm).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') });
+        }
+      }
+      if (or.length) {
+        const hits = await mgrCol.find({ isActive: true, $or: or }).toArray();
+        for (const h of hits) if (h && h.name) pushName(String(h.name).trim());
+      }
+    } catch { /* non-fatal */ }
+
+    frontier = [...new Set(next)];
   }
 
-  // De-dupe & drop empties.
-  const uniqNames = [...new Set(names.filter((s) => s && String(s).trim()))];
-  const team = await User
-    .find(assignedToFilter(uniqNames))
-    .select('_id firstName lastName name email phone employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt')
-    .lean();
-  return { manager: me, team, names: uniqNames };
+  return {
+    team:  [...teamById.values()],
+    names: [...new Set(namesAll.filter((s) => s && String(s).trim()))],
+  };
+}
+
+async function resolveTeamIds(req) {
+  const me = await User.findById(req.user.id).lean();
+  if (!me) return { manager: null, team: [], names: [] };
+  const { team, names } = await resolveDownline(me);
+  return { manager: me, team, names };
+}
+
+// Resolve the team to READ, honouring ?managerId= (drill into a sub-manager,
+// only if inside the caller's downline) and ?scope=direct (level-1 only).
+async function resolveScopedTeam(req) {
+  const me = await User.findById(req.user.id).lean();
+  if (!me) return { manager: null, target: null, team: [], names: [], denied: false };
+
+  const managerId  = String(req.query.managerId || req.query.viewAs || '').trim();
+  const directOnly = String(req.query.scope || '').trim().toLowerCase() === 'direct';
+
+  if (!managerId || managerId === String(me._id)) {
+    if (directOnly) {
+      const team = await directReportsOf(me);
+      return { manager: me, target: me, team, names: [], denied: false };
+    }
+    const { team, names } = await resolveDownline(me);
+    return { manager: me, target: me, team, names, denied: false };
+  }
+
+  const { team: myTeam } = await resolveDownline(me);
+  if (!myTeam.some((u) => String(u._id) === managerId)) {
+    return { manager: me, target: null, team: [], names: [], denied: true };
+  }
+  const targetDoc = await User.findById(managerId).lean();
+  if (!targetDoc) return { manager: me, target: null, team: [], names: [], denied: true };
+
+  if (directOnly) {
+    const team = await directReportsOf(targetDoc);
+    return { manager: me, target: targetDoc, team, names: [], denied: false };
+  }
+  const { team, names } = await resolveDownline(targetDoc);
+  return { manager: me, target: targetDoc, team, names, denied: false };
+}
+
+async function scopeOrDeny(req, res) {
+  const scoped = await resolveScopedTeam(req);
+  if (scoped.denied) {
+    res.status(403).json({ success: false, message: 'This manager is not in your reporting hierarchy.' });
+    return null;
+  }
+  return scoped;
 }
 
 /**
  * GET /api/manager/team
  * Returns the list of subordinates assigned to the logged-in manager.
  */
+/**
+ * GET /api/manager/hierarchy?managerId=<id>
+ * One TIER of the reporting tree — the direct reports of the node being viewed,
+ * split into { managers (have their own downline), directReports (leaf) }.
+ * ?managerId= drills into a sub-manager (authorised = must be in the caller's
+ * hierarchy). Drives the expandable Manager-Access hierarchy in ERM Web.
+ */
+exports.hierarchy = async (req, res) => {
+  try {
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const node = scoped.target;
+    if (!node) return res.status(404).json({ success: false, message: 'Manager not found.' });
+
+    const directs = await directReportsOf(node);
+    const resolved = await Promise.all(directs.map(async (r) => {
+      const base = {
+        _id:         r._id,
+        employeeId:  r.employeeId,
+        name:        r.name || [r.firstName, r.lastName].filter(Boolean).join(' ').trim(),
+        email:       r.email || '',
+        phone:       r.phone || '',
+        photoUrl:    r.photoUrl || '',
+        designation: pickLabel(r.designation, r.designationTitle),
+        department:  pickLabel(r.department,  r.departmentName),
+        status:      r.status || 'Active',
+        active:      (r.isActive !== false) &&
+                     !['Terminated', 'Inactive', 'Resigned'].includes(String(r.status || 'Active')),
+      };
+      const subDirects = await directReportsOf(r);
+      if (subDirects.length === 0) return { isManager: false, node: base };
+      const sub = await resolveDownline(r);
+      return { isManager: true, node: { ...base, teamCount: sub.team.length } };
+    }));
+    const managers = resolved.filter((x) => x.isManager).map((x) => x.node);
+    const leaves   = resolved.filter((x) => !x.isManager).map((x) => x.node);
+
+    res.json({
+      success: true,
+      manager: node ? {
+        _id:        node._id,
+        name:       [node.firstName, node.lastName].filter(Boolean).join(' ').trim() || node.name,
+        employeeId: node.employeeId,
+        email:      node.email,
+      } : null,
+      managers,
+      directReports: leaves,
+      counts: { managers: managers.length, directReports: leaves.length },
+    });
+  } catch (err) {
+    console.error('[manager.hierarchy]', err);
+    res.status(500).json({ success: false, message: err.message });
+  }
+};
+
 exports.team = async (req, res) => {
   try {
-    const { manager, team, names } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { target: manager, team, names } = scoped;
     const tag = manager
       ? (manager.email || manager.employeeId || String(manager._id))
       : 'unknown';
@@ -146,6 +319,11 @@ exports.team = async (req, res) => {
         presence:    u.presence    || 'offline',
         lastLocation:u.lastLocation || null,
         lastSeenAt:  u.lastSeenAt   || null,
+        // #486 — employment status so Manager Access shows terminated /
+        // resigned members as Inactive and stops treating them as active.
+        status:      u.status || 'Active',
+        active:      (u.isActive !== false) &&
+                     !['Terminated', 'Inactive', 'Resigned'].includes(String(u.status || 'Active')),
       })),
     });
   } catch (err) {
@@ -160,7 +338,9 @@ exports.team = async (req, res) => {
  */
 exports.leaves = async (req, res) => {
   try {
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     const ids = team.map((u) => u._id);
     if (ids.length === 0) return res.json({ success: true, items: [] });
 
@@ -185,7 +365,9 @@ exports.leaves = async (req, res) => {
  */
 exports.allowances = async (req, res) => {
   try {
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     const ids = team.map((u) => u._id);
     if (ids.length === 0) return res.json({ success: true, items: [] });
 
@@ -438,7 +620,9 @@ exports.actAllowance = async (req, res) => {
  */
 exports.attendance = async (req, res) => {
   try {
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     const ids = team.map((u) => u._id);
     if (ids.length === 0) return res.json({ success: true, items: [] });
 
@@ -461,7 +645,9 @@ exports.attendance = async (req, res) => {
  */
 exports.attendanceSummary = async (req, res) => {
   try {
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     if (team.length === 0) return res.json({ success: true, items: [] });
 
     const month = parseInt(req.query.month, 10) || (new Date().getMonth() + 1);
@@ -519,7 +705,9 @@ exports.attendanceSummary = async (req, res) => {
  */
 exports.liveLocations = async (req, res) => {
   try {
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     if (team.length === 0) return res.json({ success: true, data: [] });
 
     const today = new Date().toISOString().slice(0, 10);
@@ -674,7 +862,10 @@ const Announcement = require('../models/Announcement');
  */
 exports.postAnnouncement = async (req, res) => {
   try {
-    const { manager, team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const manager = scoped.manager;   // post AS the caller
+    const team    = scoped.team;      // TO the chosen audience (own / sub-manager / scope)
     if (!manager) return res.status(401).json({ success: false, message: 'Manager not found.' });
     if (team.length === 0) {
       return res.status(403).json({
@@ -786,7 +977,9 @@ exports.deleteAnnouncement = async (req, res) => {
 exports.attendanceRequests = async (req, res) => {
   try {
     const AttendanceRequest = require('../models/AttendanceRequest');
-    const { team } = await resolveTeamIds(req);
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const { team } = scoped;
     const teamIds  = team.map((u) => u._id);
     const filter = { user: { $in: teamIds } };
     const status = String(req.query.status || '').toLowerCase();
