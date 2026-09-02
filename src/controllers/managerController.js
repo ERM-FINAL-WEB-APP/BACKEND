@@ -72,6 +72,13 @@ function assignedToFilter(names) {
 // Fields every subordinate row needs across the manager endpoints.
 const TEAM_SELECT = '_id firstName lastName name email phone employeeId designation department designationTitle departmentName photoUrl presence lastLocation lastSeenAt status isActive';
 
+// #530 — A member counts as "active" unless HR has terminated/resigned them.
+// Team Members still lists inactive people (badged Inactive), but Live Tracking
+// and the Team Attendance Report must exclude them.
+const isActiveMember = (u) =>
+  (u.isActive !== false) &&
+  !['Terminated', 'Inactive', 'Resigned'].includes(String(u.status || 'Active'));
+
 /**
  * Resolve the FULL downline for the logged-in manager — #510 senior-manager
  * hierarchy. We walk the reporting tree DOWNWARD (Senior Manager → Manager →
@@ -647,7 +654,8 @@ exports.attendanceSummary = async (req, res) => {
   try {
     const scoped = await scopeOrDeny(req, res);
     if (!scoped) return;
-    const { team } = scoped;
+    // Exclude terminated/resigned members from the attendance report.
+    const team = scoped.team.filter(isActiveMember);
     if (team.length === 0) return res.json({ success: true, items: [] });
 
     const month = parseInt(req.query.month, 10) || (new Date().getMonth() + 1);
@@ -707,7 +715,8 @@ exports.liveLocations = async (req, res) => {
   try {
     const scoped = await scopeOrDeny(req, res);
     if (!scoped) return;
-    const { team } = scoped;
+    // Exclude terminated/resigned members from live tracking.
+    const team = scoped.team.filter(isActiveMember);
     if (team.length === 0) return res.json({ success: true, data: [] });
 
     const today = new Date().toISOString().slice(0, 10);
@@ -926,10 +935,15 @@ exports.postAnnouncement = async (req, res) => {
  */
 exports.myAnnouncements = async (req, res) => {
   try {
-    const me = await User.findById(req.user.id).lean();
-    if (!me) return res.json({ success: true, items: [] });
+    // #531 — When the hub is drilled into a sub-manager (?managerId=), show
+    // THAT manager's announcements, not the caller's. Only allowed for a
+    // manager inside the caller's downline (scopeOrDeny 403s otherwise).
+    const scoped = await scopeOrDeny(req, res);
+    if (!scoped) return;
+    const poster = scoped.target || scoped.manager;
+    if (!poster) return res.json({ success: true, items: [] });
     const items = await Announcement.find({
-      postedByUser: me._id,
+      postedByUser: poster._id,
       // Match BOTH team-scoped audience values: 'manager-team' (posted from
       // ERM web) and 'team' (posted from ERM mobile) — so a manager sees
       // their own team announcements regardless of which app posted them.
