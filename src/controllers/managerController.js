@@ -727,6 +727,70 @@ exports.liveLocations = async (req, res) => {
     }).select('user checkIn checkOut workedHours').lean();
     for (const a of atts) attendanceMap.set(String(a.user), a);
 
+    // #533 — Live-tracking parity with HRMS. HRMS gets its data (including the
+    // ROAD-MATCHED travel trail) by proxying the mobile backend's admin
+    // live-locations endpoint, which snaps each travelling employee's GPS
+    // trace onto the road network via OSRM. We do the SAME here, then filter
+    // to this manager's team — so ERM Web, HRMS, and the mobile source of
+    // truth show identical positions and the actual road route travelled
+    // (never a straight line between pings). Falls back to the local
+    // latest-ping logic (no road route) when the mobile secret isn't set.
+    const MOBILE_API   = (process.env.MOBILE_API_URL     || '').trim().replace(/\/+$/, '');
+    const ADMIN_SECRET = (process.env.MOBILE_ADMIN_SECRET || '').trim();
+    if (MOBILE_API && ADMIN_SECRET && typeof fetch === 'function') {
+      try {
+        const ctrl  = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 20_000);
+        let payload = {};
+        try {
+          const r = await fetch(`${MOBILE_API}/api/attendance/admin/live-locations`, {
+            headers: { 'x-admin-secret': ADMIN_SECRET },
+            signal:  ctrl.signal,
+          });
+          payload = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(payload?.message || `Mobile API ${r.status}`);
+        } finally {
+          clearTimeout(timer);
+        }
+        if (Array.isArray(payload.data)) {
+          const teamIds    = new Set(team.map((u) => String(u._id)));
+          const teamEmpIds = new Set(team.map((u) => String(u.employeeId || '')).filter(Boolean));
+          const teamEmails = new Set(team.map((u) => String(u.email || '').toLowerCase()).filter(Boolean));
+          const byId = new Map(team.map((u) => [String(u._id), u]));
+          const mine = payload.data.filter((d) =>
+            teamIds.has(String(d._id)) ||
+            (d.employeeId && teamEmpIds.has(String(d.employeeId))) ||
+            (d.email && teamEmails.has(String(d.email).toLowerCase()))
+          );
+          const data = mine.map((d) => {
+            const u   = byId.get(String(d._id));
+            const att = u ? attendanceMap.get(String(u._id)) : null;
+            return {
+              _id:         String(d._id),
+              employeeId:  d.employeeId || (u && u.employeeId) || '',
+              name:        d.name || (u && (u.name || [u.firstName, u.lastName].filter(Boolean).join(' ').trim())) || 'Unknown',
+              designation: d.role || (u ? pickLabel(u.designation, u.designationTitle) : ''),
+              photoUrl:    (u && u.photoUrl) || '',
+              lat: d.lat, lng: d.lng, speed: d.speed,
+              status:      d.status,
+              // The road-matched trail OSRM produced on the mobile backend —
+              // identical to what HRMS draws. Only present for travelling staff.
+              route:       Array.isArray(d.route) && d.route.length >= 2 ? d.route : null,
+              checkIn:     (att && att.checkIn)  || d.checkInAt || null,
+              checkOut:    (att && att.checkOut) || null,
+              lastSeen:    d.lastSeen,
+            };
+          });
+          return res.json({ success: true, data, generatedAt: payload.generatedAt || new Date().toISOString(), source: 'mobile' });
+        }
+      } catch (e) {
+        console.warn('[manager.liveLocations] mobile proxy failed, using local fallback:', e.message);
+      }
+    }
+
+    // ── Local fallback (no OSRM road-matching) ── keeps the page working even
+    // without MOBILE_API_URL / MOBILE_ADMIN_SECRET. Positions are correct; the
+    // travel trail is omitted rather than drawn as noisy straight lines.
     const out = await Promise.all(team.map(async (u) => {
       const ping = await LocationPing.findOne({ user: u._id, date: today })
         .sort({ recordedAt: -1 })
@@ -760,13 +824,14 @@ exports.liveLocations = async (req, res) => {
         photoUrl:   u.photoUrl || '',
         lat, lng, speed,
         status,
+        route:      null,
         checkIn:    att?.checkIn  || null,
         checkOut:   att?.checkOut || null,
         lastSeen:   recordedAt,
       };
     }));
 
-    res.json({ success: true, data: out, generatedAt: new Date().toISOString() });
+    res.json({ success: true, data: out, generatedAt: new Date().toISOString(), source: 'local' });
   } catch (err) {
     console.error('[manager.liveLocations]', err);
     res.status(500).json({ success: false, message: err.message });
