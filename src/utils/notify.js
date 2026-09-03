@@ -30,10 +30,54 @@ async function notify(userId, opts = {}) {
     console.log(
       `[notify] ✓ → user=${userId} type=${payload.type} title="${payload.title}"`
     );
+
+    // #545 — Real system/OS push. This backend has NO Firebase service account,
+    // so we delegate the FCM fan-out to the ERM Mobile backend (which does),
+    // server-to-server. It pushes to EVERY device the user has registered —
+    // their phone AND any browser running the ERM Web app — so a web-originated
+    // event (e.g. a manager approval) arrives as a real notification, not just
+    // the in-app bell. Fire-and-forget: never blocks or fails the notify().
+    pushViaMobile(userId, payload, doc && doc._id).catch(() => {});
+
     return doc;
   } catch (err) {
     console.error('[notify] FAILED:', err.message);
     return null;
+  }
+}
+
+// Best-effort call to the mobile backend's admin FCM endpoint.
+async function pushViaMobile(userId, payload, notificationId) {
+  const MOBILE_API   = (process.env.MOBILE_API_URL     || '').trim().replace(/\/+$/, '');
+  const ADMIN_SECRET = (process.env.MOBILE_ADMIN_SECRET || '').trim();
+  if (!MOBILE_API || !ADMIN_SECRET) {
+    // Not configured — the in-app bell still works; system push is disabled.
+    return;
+  }
+  if (typeof fetch !== 'function') return; // Node < 18
+  try {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const r = await fetch(`${MOBILE_API}/api/notification/admin/push`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-secret': ADMIN_SECRET },
+        body: JSON.stringify({
+          userId: String(userId),
+          title:  payload.title,
+          body:   payload.body,
+          link:   payload.link,
+          type:   payload.type,
+          notificationId: notificationId ? String(notificationId) : '',
+        }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) console.warn('[notify] mobile push responded', r.status);
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    console.warn('[notify] mobile push failed:', e.message);
   }
 }
 
