@@ -1,5 +1,31 @@
 const Announcement = require('../models/Announcement');
 
+// #547 — Company announcements must arrive as a real system push on the ERM
+// mobile app (and any registered browser), not just the in-app bell. This
+// backend has no Firebase service account, so it asks the mobile backend
+// (which does) to broadcast the push to every registered device. Fire-and-
+// forget — never blocks or fails the announcement create.
+async function broadcastPushViaMobile({ title, body, link }) {
+  const MOBILE_API   = (process.env.MOBILE_API_URL     || '').trim().replace(/\/+$/, '');
+  const ADMIN_SECRET = (process.env.MOBILE_ADMIN_SECRET || '').trim();
+  if (!MOBILE_API || !ADMIN_SECRET || typeof fetch !== 'function') return;
+  try {
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const r = await fetch(`${MOBILE_API}/api/notification/admin/broadcast`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', 'x-admin-secret': ADMIN_SECRET },
+        body: JSON.stringify({ title, body, link: link || '', type: 'announcement' }),
+        signal: ctrl.signal,
+      });
+      if (!r.ok) console.warn('[announcement] broadcast push responded', r.status);
+    } finally { clearTimeout(timer); }
+  } catch (e) {
+    console.warn('[announcement] broadcast push failed:', e.message);
+  }
+}
+
 /**
  * Admin auth — required for HR endpoints consumed by the HRMS web app via
  * its backend proxy. Header must match the ADMIN_SECRET env var.
@@ -91,6 +117,10 @@ exports.create = async (req, res) => {
       postedBy: postedBy || 'HR',
       audience,
     });
+    // Company-wide announcement → push to every device (not team-scoped ones).
+    if (normalizeAudience(audience) === 'all') {
+      broadcastPushViaMobile({ title, body, link: '/(tabs)/announcement' }).catch(() => {});
+    }
     res.status(201).json(a);
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
@@ -168,6 +198,10 @@ exports.adminCreate = async (req, res) => {
       audience: normalizeAudience(audience),
       externalId: externalId || undefined,
     });
+    // Company-wide announcement → push to every device (not team-scoped ones).
+    if (normalizeAudience(audience) === 'all') {
+      broadcastPushViaMobile({ title: String(title).trim(), body: String(body).trim(), link: '/(tabs)/announcement' }).catch(() => {});
+    }
     res.status(201).json({ message: 'Created', announcement: a });
   } catch (err) {
     console.error('[announcement.adminCreate]', err);
